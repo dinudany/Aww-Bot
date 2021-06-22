@@ -3,19 +3,48 @@ let express = require("express"),
   bodyParser = require("body-parser"),
   app = express(),
   request = require("request"),
-  config = require("config"),
-  images = require("./pics");
+  config = require("config");
 
 var WebSocketClient = require("websocket").client;
+var client = new WebSocketClient();
+let socketConnection;
 
 app.use(bodyParser.urlencoded({ extended: false }));
 app.use(bodyParser.json());
 
-let users = {};
-
-app.listen(8989, () => console.log("Example app listening on port 8989!"));
+app.listen(config.get("adapter.port"), () =>
+  console.log(`Example app listening on port ${config.get("adapter.port")}!`)
+);
 
 app.get("/", (req, res) => res.send("Hello World!"));
+
+client.on("connectFailed", function (error) {
+  console.log("Connect Error: " + error.toString());
+});
+
+client.on("connect", function (connection) {
+  console.log("WebSocket Client Connected");
+  connection.on("error", function (error) {
+    console.log("Connection Error: " + error.toString());
+  });
+  connection.on("close", function () {
+    console.log("echo-protocol Connection Closed");
+  });
+  connection.on("message", function (message) {
+    if (message.type === "utf8") {
+      console.log("Received: '" + message.utf8Data + "'");
+      const parseMessage = JSON.parse(message.utf8Data);
+      if (parseMessage.type === "message") {
+        const response = askTemplate(parseMessage);
+        callSendAPI(parseMessage.user, response);
+      }
+    }
+  });
+
+  socketConnection = connection;
+});
+
+client.connect(config.get("botservice.endpoint.url"), "echo-protocol");
 
 // Creates the endpoint for our webhook
 app.post("/webhook", (req, res) => {
@@ -54,7 +83,7 @@ app.post("/webhook", (req, res) => {
 // Adds support for GET requests to our webhook
 app.get("/webhook", (req, res) => {
   // Your verify token. Should be a random string.
-  let VERIFY_TOKEN = "1476955067";
+  let VERIFY_TOKEN = config.get("facebook.page.verify_token");
 
   // Parse the query params
   let mode = req.query["hub.mode"];
@@ -76,96 +105,79 @@ app.get("/webhook", (req, res) => {
 });
 
 function askTemplate(message) {
+  if (message.quick_replies) {
+    return {
+      text: message.text,
+      quick_replies: message.quick_replies.map((x) => {
+        return { content_type: "text", title: x.title, payload: x.payload };
+      }),
+    };
+  }
   return {
-    attachment: {
-      type: "template",
-      payload: {
-        template_type: "button",
-        text: message.text,
-        buttons: message.quick_replies.map((x) => {
-          return { type: "postback", title: x.title, payload: x.payload };
-        }),
-      },
-    },
+    text: message.text,
   };
 }
 
 // Handles messages events
 function handleMessage(sender_psid, received_message) {
-  let response;
-
   // Check if the message contains text
   if (received_message.text) {
-    // Create the payload for a basic text message
-    response = askTemplate();
+    getUserName(sender_psid, function (data) {
+      if (socketConnection.connected) {
+        socketConnection.send(
+          JSON.stringify({
+            type: "message",
+            text: received_message.text,
+            channel: "facebook",
+            channelId: "facebook",
+            metadata: {
+              surname: data.last_name,
+              name: data.first_name,
+              WEB_COUNTRY: "",
+              WEB_LANGUAGE: "english",
+              TIER: "",
+              SSO_TOKEN: "",
+              SKYWARDS_NO: "",
+              PERSON_ID: "",
+            },
+            userId: data.id,
+            chatId: sender_psid,
+          })
+        );
+      }
+    });
   }
-
-  // Sends the response message
-  callSendAPI(sender_psid, response);
 }
 
 function handlePostback(sender_psid, received_postback) {
-  let response;
-
   // Get the payload for the postback
   let payload = received_postback.payload;
 
   // Set the response based on the postback payload
   if (payload === "GET_STARTED") {
     getUserName(sender_psid, function (data) {
-      var client = new WebSocketClient();
-
-      client.on("connectFailed", function (error) {
-        console.log("Connect Error: " + error.toString());
-      });
-
-      client.on("connect", function (connection) {
-        console.log("WebSocket Client Connected");
-        connection.on("error", function (error) {
-          console.log("Connection Error: " + error.toString());
-        });
-        connection.on("close", function () {
-          console.log("echo-protocol Connection Closed");
-        });
-        connection.on("message", function (message) {
-          if (message.type === "utf8") {
-            console.log("Received: '" + message.utf8Data + "'");
-            const parseMessage = JSON.parse(message.utf8Data);
-            if (parseMessage.type === "message") {
-              response = askTemplate(parseMessage);
-              callSendAPI(sender_psid, response);
-            }
-          }
-        });
-
-        function sendINIT() {
-          if (connection.connected) {
-            connection.send(
-              JSON.stringify({
-                type: "hello",
-                text: "INIT",
-                channel: "facebook",
-                channelId: "facebook",
-                metadata: {
-                  surname: data.last_name,
-                  name: data.first_name,
-                  WEB_COUNTRY: "",
-                  WEB_LANGUAGE: "english",
-                  TIER: "",
-                  SSO_TOKEN: "",
-                  SKYWARDS_NO: "",
-                  PERSON_ID: "",
-                },
-                userId: data.id,
-                chatId: sender_psid,
-              })
-            );
-          }
-        }
-        sendINIT();
-      });
-
-      client.connect("ws://localhost:5000/", "echo-protocol");
+      if (socketConnection.connected) {
+        socketConnection.send(
+          JSON.stringify({
+            type: "hello",
+            text: "INIT",
+            channel: "facebook",
+            channelId: "facebook",
+            metadata: {
+              surname: data.last_name,
+              name: data.first_name,
+              WEB_COUNTRY: "",
+              WEB_LANGUAGE: "english",
+              TIER: "",
+              SSO_TOKEN: "",
+              SKYWARDS_NO: "",
+              PERSON_ID: "",
+            },
+            userId: data.id,
+            chatId: sender_psid,
+          })
+        );
+      }
     });
   }
   // Send the message to acknowledge the postback
@@ -178,6 +190,7 @@ function callSendAPI(sender_psid, response, cb = null) {
     recipient: {
       id: sender_psid,
     },
+    messaging_type: "RESPONSE",
     message: response,
   };
 

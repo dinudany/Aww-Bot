@@ -1,5 +1,5 @@
 {
-  "name": "messengerbot",
+  "name": "facebook-adapter",
   "version": "1.0.0",
   "description": "",
   "main": "index.js",
